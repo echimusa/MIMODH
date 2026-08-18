@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MIMODH XML Schema Definition v1.0
+  Minimum Information required for Multi-Omics Data Harmonization
+  Agamah et al. 2025, Frontiers in Genetics
+  Namespace: https://mimodh.org/schema/v1
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:mimodh="https://mimodh.org/schema/v1"
+           targetNamespace="https://mimodh.org/schema/v1"
+           elementFormDefault="qualified" version="1.0">
+
+  <xs:element name="MIMODHRecord" type="mimodh:MIMODHRecordType"/>
+
+  <xs:complexType name="MIMODHRecordType">
+    <xs:sequence>
+      <xs:element name="RecordHeader"            type="mimodh:RecordHeaderType"/>
+      <xs:element name="StudyMetadata"           type="mimodh:AnyType"/>
+      <xs:element name="SampleManifest"          type="mimodh:AnyType"/>
+      <xs:element name="ModalityRegistry"        type="mimodh:AnyType"/>
+      <xs:element name="PreprocessingProvenance" type="mimodh:AnyType"/>
+      <xs:element name="BatchCorrectionRecord"   type="mimodh:AnyType"/>
+      <xs:element name="IntegrationRecord"       type="mimodh:AnyType"/>
+      <xs:element name="ReactomeMapping"         type="mimodh:AnyType" minOccurs="0"/>
+      <xs:element name="DifferentialAnalysis"    type="mimodh:AnyType" minOccurs="0"/>
+      <xs:element name="PathwayActivityScores"   type="mimodh:AnyType" minOccurs="0"/>
+      <xs:element name="QualityReport"           type="mimodh:AnyType"/>
+      <xs:element name="OutputArtifacts"         type="mimodh:AnyType"/>
+      <xs:element name="Provenance"              type="mimodh:AnyType"/>
+    </xs:sequence>
+    <xs:attribute name="schemaVersion" type="xs:string" fixed="1.0" use="required"/>
+    <xs:attribute name="mimodhTier" use="required">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="Tier1"/>
+          <xs:enumeration value="Tier2"/>
+          <xs:enumeration value="Tier3"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="RecordHeaderType">
+    <xs:sequence>
+      <xs:element name="RecordID"        type="xs:string"/>
+      <xs:element name="Title"           type="xs:string"/>
+      <xs:element name="CreatedAt"       type="xs:dateTime"/>
+      <xs:element name="PipelineVersion" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="AnyType">
+    <xs:sequence>
+      <xs:any minOccurs="0" maxOccurs="unbounded" processContents="lax"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

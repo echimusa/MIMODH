@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "MultiOmics-Reactome v3.0: MIMODH-Compliant Multi-Omics Harmonization Pipeline"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Chimusa"
+    given-names: "E.R."
+version: "3.0.0"
+date-released: "2025-01-01"
+license: MIT
+repository-code: "https://github.com/echimusa/MIMODH"
+keywords:
+  - multi-omics
+  - MIMODH
+  - Reactome
+  - bioinformatics
+  - data harmonization
+  - FAIR
+references:
+  - type: article
+    authors:
+      - family-names: "Agamah"
+        given-names: "F.E."
+    title: "MIMODH: Minimum Information required for Multi-Omics Data Harmonization"
+    journal: "Frontiers in Genetics"
+    year: 2025

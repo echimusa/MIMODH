@@ -1,0 +1,8 @@
+# MultiOmics-Reactome Desktop — additional dependencies
+# Install AFTER the main requirements.txt:
+#   pip install -r requirements.txt
+#   pip install -r desktop/requirements_desktop.txt
+
+PyQt6>=6.7.0
+PyQt6-Qt6>=6.7.0
+pyinstaller>=6.6.0     # for building standalone executables

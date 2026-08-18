@@ -1,0 +1,163 @@
+name: CI
+on:
+  push:
+    branches: [main, dev, staging]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install ruff black
+      - run: ruff check backend/ desktop/ tests/ --select E,F,W,I --ignore E501
+      - run: black --check backend/ desktop/ tests/ || true
+
+  syntax:
+    name: Syntax check (all Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: |
+          python - <<'PY'
+          import ast, sys
+          from pathlib import Path
+          bad = []
+          for f in sorted(Path('.').rglob('*.py')):
+              if any(x in str(f) for x in ('.venv','build','dist','__pycache__')):
+                  continue
+              try:
+                  ast.parse(f.read_text(encoding='utf-8', errors='replace'))
+              except SyntaxError as e:
+                  bad.append(f"{f}:{e.lineno}: {e.msg}")
+          for b in bad: print("FAIL", b)
+          print(f"{'FAILED' if bad else 'OK'}: {len(bad)} syntax errors")
+          sys.exit(1 if bad else 0)
+          PY
+
+  shellcheck:
+    name: Shell script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rc=0
+          for s in scripts/*.sh desktop/*.sh fix_and_build.sh; do
+            [ -f "$s" ] || continue
+            if bash -n "$s"; then echo "OK   $s"; else echo "FAIL $s"; rc=1; fi
+          done
+          exit $rc
+
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    needs: [lint, syntax]
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "${{ matrix.python }}"}
+      - run: |
+          pip install "numpy>=2.0.0,<3.0.0"
+          pip install -r requirements.txt
+      - run: pytest tests/ -v --cov=backend --cov-report=xml
+      - uses: codecov/codecov-action@v4
+        if: matrix.python == '3.11'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+
+  test-data:
+    name: Validate bundled test data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install pandas numpy
+      - run: |
+          python - <<'PY'
+          import pandas as pd, sys
+          from pathlib import Path
+          td = Path("desktop/test_data")
+          meta = pd.read_csv(td / "metadata_test.csv", index_col=0)
+          import pandas.api.types as ptypes
+          assert not ptypes.is_numeric_dtype(meta["batch"].dtype), \
+              f"batch must be string, got {meta['batch'].dtype}"
+          assert all(isinstance(v, str) for v in meta["batch"]), "batch has non-string values"
+          assert meta["treatment"].isnull().sum() == 0, "treatment has NaN"
+          assert set(meta["condition"].unique()) == {"Case", "Control"}
+          for f in ["transcriptomics_test.csv","proteomics_test.csv","metabolomics_test.csv"]:
+              df = pd.read_csv(td / f, index_col=0)
+              assert df.isnull().sum().sum() == 0, f"{f} has NaN"
+              assert (df >= 0).all().all(), f"{f} has negatives"
+              assert set(df.index) == set(meta.index), f"{f} sample IDs misaligned"
+          print("All test-data checks PASSED")
+          PY
+
+  mimodh-xsd:
+    name: MIMODH XSD validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install lxml
+      - run: |
+          python -c "from lxml import etree; \
+            etree.XMLSchema(etree.parse('schemas/mimodh_v1.xsd')); \
+            print('MIMODH XSD valid')"
+
+  desktop:
+    name: Desktop import test (headless)
+    runs-on: ubuntu-latest
+    needs: syntax
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0
+      - run: |
+          pip install "numpy>=2.0.0,<3.0.0"
+          pip install -r requirements.txt -r desktop/requirements_desktop.txt
+      - run: |
+          python -c "from desktop.styles import DARK_THEME, STATUS_COLORS, LOG_COLORS; print('styles OK')"
+          python -c "import desktop.pipeline_worker; print('worker OK')"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "20"}
+      - run: cd frontend && npm install && npm run build
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [test, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: mimodh:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

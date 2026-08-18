@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv*/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artifacts -- NEVER commit these.
+# GitHub rejects any file over 100 MB; the desktop .exe is ~280 MB.
+build/
+dist/
+_pyi_rthooks/
+*.spec.bak
+
+# Compiled binaries and installers
+*.exe
+*.dll
+*.so
+*.dylib
+*.app/
+*.dmg
+*.pkg
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.bin
+
+# Large intermediates
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Secrets and generated config
+.env
+.env.*
+!.env.example
+*.pem
+deploy_*.env
+deployment_*.txt
+
+# Logs and crash reports
+*.log
+logs/
+crash_log.txt
+*.broken
+
+# Pipeline outputs
+multiomics_reactome_output/
+output/
+nb_output/
+*.h5ad
+*.parquet
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

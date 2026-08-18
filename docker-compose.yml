@@ -1,0 +1,61 @@
+# Local development stack. No AWS account needed -- LocalStack emulates
+# S3, SQS and DynamoDB.
+#   docker compose up --build
+#     API      http://localhost:8000/docs
+#     Frontend http://localhost:5173
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runtime
+    ports: ["8000:8000"]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: eu-west-2
+      AWS_ENDPOINT_URL: http://localstack:4566
+      PYTHONPATH: /app
+      STAGE: dev
+      S3_DATA_BUCKET: multiomics-dev-data
+      DYNAMO_JOBS_TABLE: multiomics-dev-jobs
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/multiomics-dev-jobs.fifo
+      OUTPUT_DIR: /app/output
+      ALLOWED_ORIGINS: "http://localhost:5173"
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./schemas:/app/schemas:ro
+      - output_vol:/app/output
+    depends_on:
+      localstack:
+        condition: service_healthy
+    command: uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    image: node:20-slim
+    working_dir: /app
+    volumes: ["./frontend:/app"]
+    ports: ["5173:5173"]
+    environment:
+      VITE_API_URL: http://localhost:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+  localstack:
+    image: localstack/localstack:3
+    ports: ["4566:4566"]
+    environment:
+      SERVICES: s3,sqs,dynamodb
+      DEBUG: 0
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  output_vol:
