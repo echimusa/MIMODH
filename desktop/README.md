@@ -104,6 +104,32 @@ python desktop/test_data/generate_test_data.py
 | **Results** | Grouped file tree (MIMODH record / tables / figures / HTML) · text, CSV and XML preview · open in system viewer · green banner when the MIMODH XML is written |
 | **About** | Feature cards for each subsystem · full reference list |
 
+### Choosing an integration method
+
+The **Configure** tab has an *Integration method* dropdown. Harmonisation
+(validation, preprocessing, batch correction) is identical for every method;
+only the way modalities are combined afterwards changes.
+
+| Method | Needs | Notes |
+|---|---|---|
+| **NMF** | nothing | Default. GPU-accelerated where PyTorch is present. |
+| **MOFA+** | `pip install mofapy2` | Argelaguet et al. 2020 |
+| **SNF** | nothing | Wang et al. 2014. Built-in NumPy implementation. |
+| **MCIA** | nothing | Meng et al. 2014. No R required. |
+| **DIABLO** | R + mixOmics + rpy2 | Supervised; needs a response vector |
+
+Methods whose dependency is missing appear **greyed out**, with the reason on
+hover. The app never silently substitutes a different method — if you ask for
+MOFA+ and it is unavailable, the run stops and says so, because otherwise a
+result would misreport how it was produced.
+
+The same choice is available on the command line:
+
+```bash
+python -m backend.multiomics_reactome --list-methods
+python -m backend.multiomics_reactome --mode synthetic --integration-method mcia
+```
+
 ---
 
 ## Using your own data

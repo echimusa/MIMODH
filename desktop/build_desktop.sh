@@ -64,6 +64,10 @@ pyinstaller \
     --add-data "schemas:schemas" \
     --add-data "backend:backend" \
     --add-data "desktop/test_data:desktop/test_data" \
+    --hidden-import backend \
+    --hidden-import backend.integration \
+    --hidden-import backend.multiomics_reactome \
+    --collect-submodules backend \
     --hidden-import PyQt6 \
     --hidden-import PyQt6.QtWidgets \
     --hidden-import PyQt6.QtCore \

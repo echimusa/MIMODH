@@ -152,40 +152,41 @@ class PipelineWorker(QThread):
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
 
-
-            # numba: use the real package when installed (much faster). If it is
-            # missing, inject a no-op stub so scanpy can still be imported.
-            _have_numba = False
+        # numba: scanpy imports it unconditionally and calls into it at runtime.
+        # The real package cannot be bundled on Windows (native threading dependency),
+        # so install a complete no-op substitute when it is unavailable.
+        try:
+            from backend._numba_stub import install as _install_numba
+        except ImportError:
             try:
-                import numba as _real_numba
-                _have_numba = hasattr(_real_numba, "__version__")
-            except Exception:
-                pass
+                from _numba_stub import install as _install_numba
+            except ImportError:
+                _install_numba = lambda: False
+        _NUMBA_STUBBED = _install_numba()
 
-            if not _have_numba and "numba" not in sys.modules:
-                import types as _types
-                _nb = _types.ModuleType("numba")
-
-                def _njit(*a, **k):
-                    return a[0] if (a and callable(a[0])) else (lambda f: f)
-
-                _nb.njit = _njit
-                _nb.jit = _njit
-                _nb.vectorize = _njit
-                _nb.guvectorize = _njit
-                _nb.prange = range
-                _nb.float32 = float
-                _nb.float64 = float
-                _nb.int32 = int
-                _nb.int64 = int
-                _nb.boolean = bool
-                _nb.typed = _types.ModuleType("numba.typed")
-                _nb.core = _types.ModuleType("numba.core")
-                _nb.extending = _types.ModuleType("numba.extending")
-                sys.modules["numba"] = _nb
-                sys.modules["numba.typed"] = _nb.typed
-                sys.modules["numba.core"] = _nb.core
-                sys.modules["numba.extending"] = _nb.extending
+        # Dependency preflight. A packaging gap should be reported as a
+        # complete, actionable list before any analysis begins, not as a
+        # traceback from whichever import happens to fail first.
+        try:
+            from backend._deps import check_dependencies, format_report
+            _dep = check_dependencies()
+            if _dep["missing_required"]:
+                self.log_line.emit(format_report(_dep), "ERROR")
+                raise ImportError(
+                    "Required package(s) missing: "
+                    + ", ".join(d.module for d in _dep["missing_required"])
+                    + ". See the log above for what each one is for.")
+            if _dep["missing_optional"]:
+                for d in _dep["missing_optional"]:
+                    self.log_line.emit(
+                        f"Optional package '{d.module}' not installed - "
+                        f"{d.purpose}", "WARNING")
+        except ImportError as exc:
+            if "Required package" in str(exc):
+                raise
+            # backend._deps itself unavailable; continue and let the real
+            # import below produce the error.
+            pass
 
         from backend.multiomics_reactome import (
             InputConfig, run_pipeline, OUTPUT_DIR
@@ -226,6 +227,7 @@ class PipelineWorker(QThread):
             "data_repo":       cfg_dict.get("data_repo", "local"),
             "accession":       cfg_dict.get("accession") or None,
             "ethics":          cfg_dict.get("ethics") or None,
+            "integration_method": cfg_dict.get("integration_method", "nmf"),
         }
         _use_kw = {k: v for k, v in _all_kw.items() if k in _supported}
         _extra = sorted(set(_all_kw) - set(_use_kw))
@@ -240,8 +242,20 @@ class PipelineWorker(QThread):
                 setattr(cfg, _k, _all_kw[_k])
             except Exception:
                 pass
+        _method = cfg_dict.get("integration_method", "nmf")
+        self.log_line.emit(f"Integration back-end: {_method}", "INFO")
         self.progress.emit(5, "Initialising")
-        result = run_pipeline(cfg, n_perm=int(cfg_dict.get("n_perm", 200)))
+
+        # Forward the integration method only if this backend accepts it,
+        # so an older backend/multiomics_reactome.py still runs.
+        _run_kw = {"n_perm": int(cfg_dict.get("n_perm", 200))}
+        if "integration_method" in _inspect.signature(run_pipeline).parameters:
+            _run_kw["integration_method"] = _method
+        else:
+            self.log_line.emit(
+                "This backend does not expose integration_method; "
+                "using its default (NMF).", "WARNING")
+        result = run_pipeline(cfg, **_run_kw)
         self.progress.emit(100, "COMPLETE")
         self.finished.emit({"output_dir": str(out_dir), **{
             k: str(v) for k, v in result.items()

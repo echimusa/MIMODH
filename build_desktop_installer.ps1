@@ -616,6 +616,10 @@ Write-OK "PyInstaller hooks written (matplotlib, scanpy, anndata, PyQt6 QML filt
     --collect-all     "joblib" `
     --collect-all     "tqdm" `
     --collect-all     "requests" `
+    --hidden-import   "backend" `
+    --hidden-import   "backend.integration" `
+    --hidden-import   "backend.multiomics_reactome" `
+    --collect-submodules "backend" `
     --hidden-import   "desktop.main_window" `
     --hidden-import   "desktop.pipeline_worker" `
     --hidden-import   "desktop.styles" `

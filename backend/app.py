@@ -27,7 +27,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 import boto3
 import botocore
@@ -59,6 +59,8 @@ dynamo   = session.resource("dynamodb").Table(DYNAMO_TABLE)
 sqs      = session.client("sqs")
 sm_client= session.client("sagemaker")
 
+APP_VERSION = "3.0.0"
+
 app = FastAPI(title="MultiOmics API", version="3.0.0", docs_url="/docs")
 app.add_middleware(
     CORSMiddleware,
@@ -78,6 +80,11 @@ class JobConfig(BaseModel):
     n_cells:         int   = Field(400,  ge=50,  le=200000)
     n_batches:       int   = Field(3,    ge=2,   le=20)
     n_perm:          int   = Field(200,  ge=50,  le=2000)
+    integration_method: Literal["nmf", "mofa", "snf", "mcia", "diablo"] = Field(
+        "nmf",
+        description="Joint integration back-end. Harmonisation is identical for "
+                    "all of them; only the integration step changes. "
+                    "GET /integration-methods lists what this deployment supports.")
     use_sagemaker:   bool  = Field(False, description="Route large jobs to SageMaker")
     # S3 keys for uploaded input files (populated after /upload)
     s3_keys: Dict[str, str] = Field(default_factory=dict,
@@ -157,9 +164,37 @@ def _list_result_keys(job_id: str) -> List[str]:
 # ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/integration-methods", tags=["meta"])
+def integration_methods():
+    """Report which integration back-ends this deployment can actually run.
+
+    Clients should call this before offering a choice to the user, because
+    availability depends on which optional packages are present in the image.
+    """
+    try:
+        from backend.integration import method_status
+    except ImportError:
+        try:
+            from integration import method_status
+        except ImportError:
+            return {"error": "integration module unavailable", "methods": {}}
+    st = method_status()
+    return {
+        "default": "nmf",
+        "available": [k for k, v in st.items() if v["available"]],
+        "methods": st,
+    }
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+    """Liveness probe. Reports the version so a client (or a reviewer
+    re-testing a reported defect) can confirm which build is running."""
+    return {
+        "status":  "ok",
+        "version": APP_VERSION,
+        "ts":      datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.post("/upload")
@@ -261,6 +296,7 @@ def _launch_sagemaker_job(job_id: str, cfg: JobConfig):
                 "--n-samples", str(cfg.n_samples),
                 "--n-cells",   str(cfg.n_cells),
                 "--n-perm",    str(cfg.n_perm),
+                "--integration-method", cfg.integration_method,
             ],
         },
         ProcessingInputs=[{
@@ -333,7 +369,13 @@ def _run_pipeline_job(job_id: str, cfg_dict: Dict):
         spatial         = local_paths.get("spatial"),
         metadata        = local_paths.get("metadata"),
     )
-    run_pipeline(icfg, n_perm=cfg_dict.get("n_perm", 200))
+    _method = cfg_dict.get("integration_method", "nmf")
+    log.info("Integration back-end: %s", _method)
+    import inspect as _inspect
+    _kw = {"n_perm": cfg_dict.get("n_perm", 200)}
+    if "integration_method" in _inspect.signature(run_pipeline).parameters:
+        _kw["integration_method"] = _method
+    run_pipeline(icfg, **_kw)
 
     # Upload results to S3
     for f in output_dir.iterdir():

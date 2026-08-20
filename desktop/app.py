@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 app.py — MultiOmics-Reactome Desktop v3.0
 ==========================================
@@ -19,6 +20,27 @@ from pathlib import Path
 _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# When frozen, the extraction folder must also be importable.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    for _p in (sys._MEIPASS,
+               os.path.join(sys._MEIPASS, "desktop"),
+               os.path.join(sys._MEIPASS, "backend")):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+
+# numba: scanpy imports it unconditionally and calls into it at runtime.
+# The real package cannot be bundled on Windows (native threading dependency),
+# so install a complete no-op substitute when it is unavailable.
+try:
+    from backend._numba_stub import install as _install_numba
+except ImportError:
+    try:
+        from _numba_stub import install as _install_numba
+    except ImportError:
+        _install_numba = lambda: False
+_NUMBA_STUBBED = _install_numba()
 
 
 def _check_pyqt():

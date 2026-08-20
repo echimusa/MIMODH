@@ -523,10 +523,33 @@ class BatchCorrector:
         Processes `emb_b` in chunks to avoid building an n×n distance matrix.
         """
         log.info(f"    Chunked MNN  n={len(emb_a)}  k={k}  chunk={chunk_size} …")
-        nn_a = NearestNeighbors(n_neighbors=k, metric="cosine",
-                                algorithm="ball_tree", n_jobs=-1).fit(emb_a)
-        nn_b = NearestNeighbors(n_neighbors=k, metric="cosine",
-                                algorithm="ball_tree", n_jobs=-1).fit(emb_b)
+        # scikit-learn's ball-tree does not accept the cosine metric. L2-normalising
+        # the embeddings makes Euclidean distance a monotone function of cosine
+        # distance, so the neighbour ranking is identical while ball-tree indexing
+        # (and its O(n log n) behaviour) is retained.
+        def _l2(X):
+            X = np.asarray(X, dtype=np.float64)
+            nrm = np.linalg.norm(X, axis=1, keepdims=True)
+            nrm[nrm < 1e-12] = 1.0
+            return X / nrm
+
+        # MNN requires both embeddings to live in a common space. PCA/LSI can
+        # return different component counts per modality (n_components is capped
+        # at min(n_samples, n_features)), so truncate both to the shared minimum
+        # before matching. Without this the neighbour query is undefined.
+        d = min(emb_a.shape[1], emb_b.shape[1])
+        if emb_a.shape[1] != emb_b.shape[1]:
+            log.info(f"      dimensionality differs "
+                     f"({emb_a.shape[1]} vs {emb_b.shape[1]}); "
+                     f"truncating both to {d} components for matching")
+        emb_a, emb_b = emb_a[:, :d], emb_b[:, :d]
+
+        emb_a_n, emb_b_n = _l2(emb_a), _l2(emb_b)
+        k = int(max(1, min(k, len(emb_a) - 1, len(emb_b) - 1)))
+        nn_a = NearestNeighbors(n_neighbors=k, metric="euclidean",
+                                algorithm="ball_tree", n_jobs=-1).fit(emb_a_n)
+        nn_b = NearestNeighbors(n_neighbors=k, metric="euclidean",
+                                algorithm="ball_tree", n_jobs=-1).fit(emb_b_n)
 
         # Identify MNN pairs in chunks
         mnn_pairs: List[Tuple[int, int]] = []
@@ -536,11 +559,11 @@ class BatchCorrector:
             end   = min(start + chunk_size, n)
             chunk = emb_a[start:end]
             # A's NNs in B-space
-            idx_in_b = nn_b.kneighbors(chunk, return_distance=False)
+            idx_in_b = nn_b.kneighbors(_l2(chunk), return_distance=False)
             for local_i, js in enumerate(idx_in_b):
                 i = start + local_i
                 # B's NNs in A-space for each j in js
-                idx_in_a = nn_a.kneighbors(emb_b[js], return_distance=False)
+                idx_in_a = nn_a.kneighbors(emb_b_n[js], return_distance=False)
                 for jj, js2 in enumerate(idx_in_a):
                     if i in js2:
                         mnn_pairs.append((i, js[jj]))
@@ -561,25 +584,67 @@ class BatchCorrector:
 
 class MultiOmicsIntegrator:
     """
-    Three complementary integration strategies:
-    1. TorchNMF factor model  (MOFA+-style latent factors)
-    2. Weighted Nearest Neighbour graph  (Seurat WNN-style)
-    3. Joint UMAP + Leiden clustering
+    Integration of harmonised, batch-corrected per-modality matrices.
+
+    The integration step is pluggable. Harmonisation (validation, preprocessing,
+    batch correction) is performed once and is independent of the method used to
+    combine modalities, so the integration back-end can be changed without
+    repeating any earlier stage.
+
+    Back-ends (see backend/integration.py):
+        nmf     Non-negative matrix factorisation. Default. No optional
+                dependency; GPU-accelerated via PyTorch where available.
+        mofa    MOFA+ (Argelaguet et al. 2020). Requires mofapy2.
+        snf     Similarity Network Fusion (Wang et al. 2014). Uses snfpy when
+                usable, otherwise the built-in NumPy implementation.
+        mcia    Multiple Co-Inertia Analysis (Meng et al. 2014). Built-in
+                NumPy implementation; no R required.
+        diablo  DIABLO block sPLS-DA (Singh et al. 2019). Supervised; requires
+                R, mixOmics and rpy2, and a response vector.
+
+    In addition to the latent factors, a Weighted Nearest Neighbour affinity
+    graph (Seurat v4 style) and a joint UMAP with Leiden clustering are produced
+    for every back-end.
     """
 
-    def __init__(self, n_factors: int = 30, n_neighbors: int = 15, n_jobs: int = -1):
-        self.n_factors   = n_factors
-        self.n_neighbors = n_neighbors
-        self.n_jobs      = n_jobs
-        self.nmf         = TorchNMF(n_components=n_factors, max_iter=300)
+    def __init__(self, n_factors: int = 30, n_neighbors: int = 15,
+                 n_jobs: int = -1, method: str = "nmf",
+                 method_kwargs: Optional[Dict] = None):
+        self.n_factors     = n_factors
+        self.n_neighbors   = n_neighbors
+        self.n_jobs        = n_jobs
+        self.method        = str(method).lower().strip()
+        self.method_kwargs = dict(method_kwargs or {})
+        self.nmf           = TorchNMF(n_components=n_factors, max_iter=300)
 
-    def mofa_nmf(self, embeddings: Dict[str, np.ndarray]) -> np.ndarray:
-        log.info("  MOFA/NMF latent factor extraction …")
-        X_cat = np.hstack([e - e.min(axis=0) for e in embeddings.values()])
-        W     = self.nmf.fit_transform(X_cat)
-        log.info(f"    Factor matrix: {W.shape}  "
-                 f"recon_err={self.nmf.reconstruction_err_:.4f}")
+    def extract_factors(self, embeddings: Dict[str, np.ndarray]) -> np.ndarray:
+        """Integrate modalities using the configured back-end."""
+        if self.method == "nmf":
+            # Use the project's GPU-accelerated implementation.
+            log.info("  NMF latent factor extraction (GPU/CPU) …")
+            X_cat = np.hstack([e - e.min(axis=0) for e in embeddings.values()])
+            W     = self.nmf.fit_transform(X_cat)
+            log.info(f"    Factor matrix: {W.shape}  "
+                     f"recon_err={self.nmf.reconstruction_err_:.4f}")
+            return W
+
+        try:
+            from .integration import integrate as _integrate
+        except ImportError:
+            from integration import integrate as _integrate
+
+        W = _integrate(embeddings, method=self.method,
+                       n_factors=self.n_factors, **self.method_kwargs)
+        log.info(f"    Factor matrix: {W.shape}")
         return W
+
+    # Retained for backward compatibility with earlier releases.
+    def mofa_nmf(self, embeddings: Dict[str, np.ndarray]) -> np.ndarray:
+        """Deprecated alias for extract_factors(). Kept so existing callers work."""
+        warnings.warn("mofa_nmf() is deprecated and performs NMF, not MOFA+. "
+                      "Use extract_factors(), and set method='mofa' for MOFA+.",
+                      DeprecationWarning, stacklevel=2)
+        return self.extract_factors(embeddings)
 
     def wnn_graph(self, embeddings: Dict[str, np.ndarray]) -> np.ndarray:
         log.info("  WNN affinity graph …")
@@ -625,10 +690,11 @@ class MultiOmicsIntegrator:
 
     def integrate(self, corrected_embeddings: Dict[str, np.ndarray],
                   obs_names: List[str]) -> Dict:
-        factors = self.mofa_nmf(corrected_embeddings)
+        factors = self.extract_factors(corrected_embeddings)
         wnn     = self.wnn_graph(corrected_embeddings)
         adata   = self.joint_umap(factors, obs_names)
         return {
+            "integration_method": self.method,
             "factor_matrix":    factors,
             "wnn_affinity":     wnn,
             "integrated_adata": adata,
@@ -673,7 +739,14 @@ class MetadataHarmonizer:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(n_samples: int = 500, n_cells: int = 2000,
-                 n_batches: int = 5, n_jobs: int = -1) -> Dict:
+                 n_batches: int = 5, n_jobs: int = -1,
+                 integration_method: str = "nmf") -> Dict:
+    """Run the full pipeline.
+
+    integration_method : {"nmf", "mofa", "snf", "mcia", "diablo"}
+        Back-end used for the integration step. Harmonisation is
+        identical for all of them. See backend/integration.py.
+    """
 
     t0 = time.time()
     bar = "═" * 62
@@ -767,7 +840,10 @@ def run_pipeline(n_samples: int = 500, n_cells: int = 2000,
 
     # ── 6. Bulk integration ───────────────────────────────────────────────────
     log.info("\n[6] Bulk multi-omics integration")
-    integrator = MultiOmicsIntegrator(n_factors=30, n_neighbors=15, n_jobs=n_jobs)
+    log.info(f"  Integration back-end: {integration_method}")
+    integrator = MultiOmicsIntegrator(n_factors=30, n_neighbors=15,
+                                      n_jobs=n_jobs,
+                                      method=integration_method)
 
     bulk_embeddings = {
         "genomics":        geno_emb,
@@ -831,11 +907,56 @@ def run_pipeline(n_samples: int = 500, n_cells: int = 2000,
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="MultiOmics-Reactome integration pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Integration back-ends
+---------------------
+  nmf     Non-negative matrix factorisation (default). No optional dependency.
+  mofa    MOFA+   - pip install mofapy2
+  snf     Similarity Network Fusion - built in; uses snfpy when usable
+  mcia    Multiple Co-Inertia Analysis - built in, no R required
+  diablo  DIABLO block sPLS-DA - requires R, mixOmics and rpy2 (supervised)
+
+List what is usable in this environment:
+  python -m backend.multiomics_pipeline --list-methods
+""")
+    ap.add_argument("--n-samples", type=int, default=500)
+    ap.add_argument("--n-cells",   type=int, default=2000)
+    ap.add_argument("--n-batches", type=int, default=5)
+    ap.add_argument("--n-jobs",    type=int, default=-1)
+    ap.add_argument("--integration-method", "-m", default="nmf",
+                    choices=["nmf", "mofa", "snf", "mcia", "diablo"],
+                    help="Integration back-end (default: nmf)")
+    ap.add_argument("--list-methods", action="store_true",
+                    help="Report which back-ends are usable, then exit")
+    args = ap.parse_args()
+
+    if args.list_methods:
+        try:
+            from .integration import method_status
+        except ImportError:
+            from integration import method_status
+        print(f"{'method':8s} {'status':13s} {'type':13s} description")
+        print("-" * 78)
+        for name, st in method_status().items():
+            status = "available" if st["available"] else "UNAVAILABLE"
+            kind   = "supervised" if st["supervised"] else "unsupervised"
+            print(f"{name:8s} {status:13s} {kind:13s} {st['label']}")
+            print(f"{'':8s} {'':13s} {'':13s} {st['citation']}")
+            if st["reason"]:
+                print(f"{'':8s} -> {st['reason']}")
+        raise SystemExit(0)
+
     results = run_pipeline(
-        n_samples  = 500,    # ← scale freely; ~50k viable on 32 GB RAM
-        n_cells    = 2000,   # ← scale to 200k with chunked MNN + Harmony
-        n_batches  = 5,
-        n_jobs     = -1,     # all CPU cores for PCA
+        n_samples          = args.n_samples,
+        n_cells            = args.n_cells,
+        n_batches          = args.n_batches,
+        n_jobs             = args.n_jobs,
+        integration_method = args.integration_method,
     )
 
     adata = results["integrated_bulk"]

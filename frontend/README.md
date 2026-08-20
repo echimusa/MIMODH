@@ -83,6 +83,29 @@ aws cloudfront create-invalidation --distribution-id <ID> --paths "/*"
 | **Results** | Plotly interactive network, DE volcano, pathway heatmap |
 | **Download** | Every artifact, including `mimodh_record.xml` |
 
+### Integration method
+
+Query the deployment for what it supports, then offer only those:
+
+```js
+const { available, methods, default: dflt } =
+  await fetch(`${API}/integration-methods`).then(r => r.json());
+// available -> ["nmf","mofa","snf","mcia"]
+```
+
+Submit it with the job:
+
+```js
+await fetch(`${API}/jobs`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+  body: JSON.stringify({ mode: "real", integration_method: "mcia", n_perm: 200 }),
+});
+```
+
+`integration_method` is validated server-side against
+`nmf | mofa | snf | mcia | diablo`; anything else returns 422.
+
 ---
 
 ## Project structure

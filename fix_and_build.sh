@@ -203,20 +203,15 @@ step "Pre-flight import test"
 
 if "$PY" - <<'PYTEST'
 import sys
-mods = ["numpy","scipy","pandas","sklearn","matplotlib","seaborn",
-        "anndata","scanpy","harmonypy","networkx","lxml","PyQt6.QtWidgets"]
-bad = []
-for m in mods:
-    try:
-        __import__(m)
-    except ImportError as e:
-        bad.append(f"{m}: {e}")
-if bad:
-    print("MISSING:")
-    for b in bad:
-        print("  " + b)
-    sys.exit(1)
-print("All required modules import OK")
+sys.path.insert(0, ".")
+try:
+    from backend._deps import check_dependencies, format_report
+except Exception as exc:
+    print("could not load backend._deps:", exc)
+    raise SystemExit(1)
+r = check_dependencies()
+print(format_report(r))
+raise SystemExit(1 if r["missing_required"] else 0)
 PYTEST
 then
   info "all required modules present"
@@ -265,8 +260,13 @@ RT_HOOK_DIR="_pyi_rthooks"
 mkdir -p "$RT_HOOK_DIR"
 cat > "${RT_HOOK_DIR}/rthook_mimodh_paths.py" <<'HOOK'
 # Runs before any application code inside the frozen binary.
-# Puts the PyInstaller extraction folder on sys.path so that
-# "import desktop.pipeline_worker" and "import backend.x" resolve.
+#
+# 1. Put the extraction folder on sys.path so "desktop.*" and "backend.*" resolve.
+# 2. Install the numba substitute before anything can import scanpy. scanpy
+#    imports numba unconditionally and calls into it at runtime; the real
+#    package cannot be bundled on Windows because llvmlite carries a native
+#    threading dependency. This must happen here, ahead of all application
+#    code, because any module that touches scanpy first would otherwise fail.
 import sys
 import os
 
@@ -275,6 +275,12 @@ if hasattr(sys, "_MEIPASS"):
     for _p in (_m, os.path.join(_m, "desktop"), os.path.join(_m, "backend")):
         if _p not in sys.path:
             sys.path.insert(0, _p)
+
+try:
+    from backend._numba_stub import install as _install_numba
+    _install_numba()
+except Exception:
+    pass
 HOOK
 info "runtime hook written"
 
@@ -334,6 +340,10 @@ PI_ARGS+=(
   --collect-all        numpy
   --collect-all        lxml
   --collect-all        pyparsing
+  --collect-all        requests
+  --collect-all        joblib
+  --hidden-import      tqdm
+  --hidden-import      tqdm.auto
   --collect-submodules desktop
   --collect-submodules backend
   --hidden-import      desktop
@@ -347,6 +357,9 @@ PI_ARGS+=(
   --hidden-import      desktop.widgets.about_tab
   --hidden-import      backend
   --hidden-import      backend.multiomics_reactome
+  --hidden-import      backend._harmony_fallback
+  --hidden-import      backend._numba_stub
+  --hidden-import      backend._deps
   --hidden-import      harmonypy
   --hidden-import      pycombat
   --exclude-module     torch
